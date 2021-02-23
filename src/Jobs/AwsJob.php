@@ -5,6 +5,7 @@ namespace Dusterio\AwsWorker\Jobs;
 use Illuminate\Queue\Jobs\Job;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Queue\Job as JobContract;
+use Illuminate\Queue\Jobs\JobName;
 
 class AwsJob extends Job implements JobContract
 {
@@ -38,12 +39,17 @@ class AwsJob extends Job implements JobContract
      */
     public function fire()
     {
-        if (method_exists($this, 'resolveAndFire')) {
-            $this->resolveAndFire(json_decode($this->getRawBody(), true));
-            return;
-        }
+        $payload = $this->payload();
 
-        parent::fire();
+        [$class, $method] = JobName::parse($payload['job']);
+
+        // Work around a bug that would make a serialized string corrupt based on encoded binary data
+        // (unserialize(): Error at offset x of y bytes). The best solution would be to base64_encode and
+        // decode the data, but that would be quite hard to implement in the Laravel flow, so this is the
+        // next best thing... Basically, this recalculates the length of the items in the command payload.
+        $payload['data']['command'] = $this->rebuildSerializedString($payload['data']['command']);
+
+        ($this->instance = $this->resolve($class))->{$method}($this, $payload['data']);
     }
 
     /**
@@ -125,5 +131,19 @@ class AwsJob extends Job implements JobContract
     public function getSqsJob()
     {
         return $this->job;
+    }
+
+    /**
+     * Rebuild a serialized string in case binary data made it corrupt.
+     *
+     * @param $string
+     * @return string|string[]|null
+     * @link https://stackoverflow.com/questions/10152904/how-to-repair-a-serialized-string-which-has-been-corrupted-by-an-incorrect-byte/21389439#21389439
+     */
+    protected function rebuildSerializedString($string)
+    {
+        return preg_replace_callback('!s:(\d+):"(.*?)";!', function ($match) {
+            return ($match[1] == strlen($match[2])) ? $match[0] : 's:'.strlen($match[2]).':"'.$match[2].'";';
+        }, $string);
     }
 }
